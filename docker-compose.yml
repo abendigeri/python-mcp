@@ -1,0 +1,156 @@
+version: "3.9"
+
+networks:
+  monitor-net:
+    driver: bridge
+    name: monitor-net
+
+volumes:
+  pgdata:
+  ollama-data:
+  openwebui-data:
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: zabbix-db
+    hostname: zabbix-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix
+      POSTGRES_DB: zabbix
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [monitor-net]
+
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:ubuntu-7.4-latest
+    container_name: zabbix-server
+    hostname: zabbix-server
+    depends_on: [db]
+    environment:
+      DB_SERVER_HOST: zabbix-db
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix
+      POSTGRES_DB: zabbix
+      ZBX_STARTPOLLERS: 10
+    ports:
+      - "10051:10051"
+    networks: [monitor-net]
+    restart: unless-stopped
+
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:ubuntu-7.4-latest
+    container_name: zabbix-web
+    hostname: zabbix-web
+    depends_on: [db, zabbix-server]
+    environment:
+      DB_SERVER_HOST: zabbix-db
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix
+      POSTGRES_DB: zabbix
+      ZBX_SERVER_HOST: zabbix-server
+      PHP_TZ: "Asia/Kolkata"
+    ports:
+      - "8080:8080"
+    networks: [monitor-net]
+    restart: unless-stopped
+
+  zabbix-agent2:
+    image: zabbix/zabbix-agent2:ubuntu-7.4-latest
+    container_name: zabbix-agent2
+    hostname: zabbix-agent2
+    environment:
+      ZBX_HOSTNAME: docker-host
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_SERVER_PORT: "10051"
+      ZBX_LISTENPORT: "10500"
+    ports:
+      - "10500:10500"
+    networks: [monitor-net]
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    hostname: ollama
+    gpus: all                    # GPU is used here (inference backend)
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks: [monitor-net]
+    restart: unless-stopped
+    command: ["serve"]
+    
+      
+  # Build Zabbix MCP from local clone at ./zabbix-mcp-server
+  zabbix-mcp:
+    build:
+      context: ./zabbix-mcp-server
+      dockerfile: Dockerfile
+    image: zabbix-mcp-local:latest
+    container_name: zabbix-mcp
+    hostname: zabbix-mcp
+    depends_on: [zabbix-server, zabbix-web]
+    environment:
+      ZABBIX_URL: http://zabbix-web:8080
+        #ZABBIX_USER: Admin
+        #ZABBIX_PASSWORD: zabbix
+      ZABBIX_TOKEN: d4dbe098d5247887984de10aee996209b93c72f9ecf2801e0fe238cb0f14bdf8
+      READ_ONLY: true
+
+
+
+    env_file:
+      - ./.env           # requires ZABBIX_URL=http://zabbix-web:8080 and ZABBIX_TOKEN=...
+    ports:
+      - "8820:8820"
+    networks: [monitor-net]
+    restart: unless-stopped
+    
+  # Open WebUI (UI only; uses Ollama backend for GPU inference)
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    hostname: open-webui
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      # WEBUI_AUTH: "true"
+      # DEFAULT_MODELS: "qwen2.5:3b-instruct"
+    ports:
+      - "3000:8080"
+    volumes:
+      - openwebui-data:/app/backend/data
+    networks: [monitor-net]
+    restart: unless-stopped
+
+      # ---- Jump service (Ubuntu 22.04) ----
+  jump-server:
+    image: ubuntu:22.04
+    container_name: jump-server
+    hostname: jump-server
+    command: ["/bin/bash","-lc","sleep infinity"]
+    tty: true
+    stdin_open: true
+    networks: [monitor-net]
+    volumes:
+      - ./jump-home:/root
+    restart: unless-stopped
+
+
+  chatbot:
+    build:
+      context: ./chatbot
+    image: chatbot:latest
+    container_name: chatbot
+    hostname: chatbot
+    ports:
+      - "9000:9000"
+    networks:
+      - monitor-net
+    restart: unless-stopped
+
